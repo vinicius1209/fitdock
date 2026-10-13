@@ -1,9 +1,12 @@
 package dev.vinimachado.fitdock
 
 import android.content.Context
+import android.util.Log
 import androidx.core.content.edit
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
@@ -45,7 +48,8 @@ object SyncRunner {
                 error("Dê acesso ao Health Connect no app FitDock.")
             }
             val snapshot = HealthReader.read(context)
-            val host = sendSomewhere(context, prefs, snapshot)
+            val (host, nextSync) = sendSomewhere(context, prefs, snapshot)
+            FollowUpWorker.schedule(context, nextSync ?: DEFAULT_NEXT_SYNC_SECONDS)
             buildString {
                 append("Enviado às ${LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))} para $host. ")
                 append("Passos: ${snapshot.steps ?: "sem dado"}. ")
@@ -53,29 +57,61 @@ object SyncRunner {
             }
         }
         prefs.lastResult = outcome.getOrElse { "Falhou: ${it.message ?: it.javaClass.simpleName}" }
+        outcome.exceptionOrNull()?.let { Log.w(TAG, "Sincronização falhou", it) } ?: Log.i(TAG, prefs.lastResult)
+        // Fora de casa (ou Mac desligado) não adianta insistir: tenta de novo com calma.
+        if (outcome.isFailure && prefs.code.isNotBlank()) {
+            FollowUpWorker.schedule(context, OFFLINE_NEXT_SYNC_SECONDS)
+        }
         return outcome
     }
 
-    private suspend fun sendSomewhere(context: Context, prefs: Prefs, snapshot: HealthSnapshot): String {
+    private const val TAG = "FitDock"
+    private const val DEFAULT_NEXT_SYNC_SECONDS = 180
+    private const val OFFLINE_NEXT_SYNC_SECONDS = 600
+
+    /** Devolve o endereço usado e o intervalo pedido pelo Mac. */
+    private suspend fun sendSomewhere(context: Context, prefs: Prefs, snapshot: HealthSnapshot): Pair<String, Int?> {
         val manual = prefs.manualHost
         if (manual.isNotBlank()) {
-            MacClient.send(context, manual, prefs.code, snapshot)
-            return manual
+            return manual to MacClient.send(context, manual, prefs.code, snapshot)
         }
         val cached = prefs.discoveredHost
         if (cached.isNotBlank()) {
             try {
-                MacClient.send(context, cached, prefs.code, snapshot)
-                return cached
+                return cached to MacClient.send(context, cached, prefs.code, snapshot)
             } catch (e: IOException) {
                 // O IP do Mac pode ter mudado: procura de novo.
+                Log.w(TAG, "Falha no endereço conhecido $cached: $e")
             }
         }
         val found = MacClient.discover(context)
             ?: throw IOException("Não encontrei o FitDock do Mac na rede. O Mac está ligado e na mesma Wi-Fi?")
-        MacClient.send(context, found, prefs.code, snapshot)
+        val nextSync = MacClient.send(context, found, prefs.code, snapshot)
         prefs.discoveredHost = found
-        return found
+        return found to nextSync
+    }
+}
+
+/**
+ * Envio seguinte, no intervalo que o Mac pediu (45 s com o painel aberto, 3 min fora disso).
+ * O periódico de 15 min continua como rede de segurança caso esta corrente se perca.
+ */
+class FollowUpWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    override suspend fun doWork(): Result {
+        // SyncRunner já agenda o próximo; não há retry aqui para a corrente não se duplicar.
+        SyncRunner.run(applicationContext)
+        return Result.success()
+    }
+
+    companion object {
+        private const val NAME = "fitdock-next"
+
+        fun schedule(context: Context, delaySeconds: Int) {
+            val request = OneTimeWorkRequestBuilder<FollowUpWorker>()
+                .setInitialDelay(delaySeconds.toLong(), TimeUnit.SECONDS)
+                .build()
+            WorkManager.getInstance(context).enqueueUniqueWork(NAME, ExistingWorkPolicy.REPLACE, request)
+        }
     }
 }
 
@@ -91,8 +127,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 
         /**
          * 15 minutos é o menor intervalo que o Android permite para trabalho periódico.
-         * Sem exigir "rede conectada": o Android só considera atendido com internet validada,
-         * e o envio é pela rede local. Se o Mac não responder, o worker tenta de novo.
+         *
+         * Sem condição de rede, de propósito: na Samsung o app em segundo plano fica congelado
+         * com a rede negada (OEM_DENY), e o agendador nunca daria a condição como atendida.
+         * A tarefa sem condição roda, a Samsung descongela o app para ela, e com a otimização
+         * de bateria liberada (ver MainActivity) o Android não corta a rede (APP_BACKGROUND).
          */
         fun schedule(context: Context) {
             val request = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES).build()

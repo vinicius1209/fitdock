@@ -1,7 +1,10 @@
 package dev.vinimachado.fitdock
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -20,6 +23,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var prefs: Prefs
     private lateinit var statusText: TextView
     private lateinit var permissionButton: Button
+    private lateinit var batteryText: TextView
+    private lateinit var batteryButton: Button
     private lateinit var codeInput: EditText
     private lateinit var hostInput: EditText
     private lateinit var resultText: TextView
@@ -46,6 +51,13 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshStatus() {
         resultText.text = prefs.lastResult
+        val unrestricted = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        batteryText.text = if (unrestricted) {
+            "Segundo plano: liberado, os envios seguem com o celular bloqueado."
+        } else {
+            "Segundo plano: restrito. Com o celular bloqueado o sistema corta a rede do app e os envios param."
+        }
+        batteryButton.visibility = if (unrestricted) View.GONE else View.VISIBLE
         lifecycleScope.launch {
             try {
                 val missing = HealthReader.missingPermissions(this@MainActivity)
@@ -106,6 +118,19 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { requestPermissions.launch(HealthReader.permissions) }
         }
         column.addView(permissionButton)
+        gap(12)
+        batteryText = TextView(this).apply { textSize = 16f }
+        column.addView(batteryText)
+        batteryButton = Button(this).apply {
+            text = "Liberar uso em segundo plano"
+            setOnClickListener {
+                @Suppress("BatteryLife") // app pessoal: precisa rodar com o celular bloqueado
+                val request = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+                runCatching { startActivity(request) }
+                    .onFailure { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+            }
+        }
+        column.addView(batteryButton)
         column.addView(Button(this).apply {
             text = "Abrir Health Connect"
             setOnClickListener {

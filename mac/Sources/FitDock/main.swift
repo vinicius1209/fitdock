@@ -20,13 +20,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         server = SnapshotServer(
             port: AppModel.port,
             token: model.code,
-            onSnapshot: { snapshot in Task { @MainActor in model.accept(snapshot) } },
+            onSnapshot: { snapshot, next in
+                Task { @MainActor in
+                    withAnimation(.spring(response: 0.6, dampingFraction: 0.85)) { model.accept(snapshot, nextSync: next) }
+                }
+            },
             onStatus: { status in Task { @MainActor in model.serverStatus = status } }
         )
         server.start()
 
         model.onChange = { [weak self] in self?.updateStatusTitle() }
         model.onCodeChange = { [server] code in server?.setToken(code) }
+        model.onInterest = { [server] in server?.setEager(until: Date().addingTimeInterval(AppModel.interestWindow)) }
         updateStatusTitle()
 
         // Atualiza o "há X min" e apaga os números quando o dado envelhece.
@@ -36,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePanel(_ sender: NSStatusBarButton) {
-        if !panel.isShown { model.now = Date() }
+        if !panel.isShown { model.panelOpened() }
         panel.toggle(from: sender)
     }
 

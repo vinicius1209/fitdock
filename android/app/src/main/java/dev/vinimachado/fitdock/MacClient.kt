@@ -27,8 +27,11 @@ object MacClient {
     private const val SERVICE_TYPE = "_fitdock._tcp."
     private const val DISCOVERY_TIMEOUT_MS = 8_000L
 
-    /** Envia o snapshot. Lança IOException se o Mac não responder. */
-    suspend fun send(context: Context, host: String, code: String, snapshot: HealthSnapshot) = withContext(Dispatchers.IO) {
+    /**
+     * Envia o snapshot e devolve o intervalo (s) que o Mac pediu até o próximo envio
+     * (curto quando alguém está olhando o painel). Lança IOException se o Mac não responder.
+     */
+    suspend fun send(context: Context, host: String, code: String, snapshot: HealthSnapshot): Int? = withContext(Dispatchers.IO) {
         val body = toJson(context, snapshot).toString().toByteArray(Charsets.UTF_8)
         val connection = URL("http://$host/v1/snapshot").openConnection() as HttpURLConnection
         try {
@@ -41,7 +44,10 @@ object MacClient {
             connection.setFixedLengthStreamingMode(body.size)
             connection.outputStream.use { it.write(body) }
             when (val status = connection.responseCode) {
-                200 -> Unit
+                200 -> {
+                    val reply = connection.inputStream.bufferedReader().use { it.readText() }
+                    runCatching { JSONObject(reply).optInt("nextSyncSeconds", 0) }.getOrNull()?.takeIf { it > 0 }
+                }
                 401 -> throw InvalidCodeException()
                 else -> throw IOException("O Mac respondeu com erro $status.")
             }

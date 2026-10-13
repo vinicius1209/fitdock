@@ -8,13 +8,15 @@ final class SnapshotServer: @unchecked Sendable {
     private let port: UInt16
     private var token: String
     private var listener: NWListener?
-    private let onSnapshot: @Sendable (Snapshot) -> Void
+    /// Até quando pedir envios rápidos ao celular (alguém está olhando o painel).
+    private var eagerUntil = Date.distantPast
+    private let onSnapshot: @Sendable (Snapshot, Int) -> Void
     private let onStatus: @Sendable (String) -> Void
 
     private static let maxRequestBytes = 2_000_000
 
     init(port: UInt16, token: String,
-         onSnapshot: @escaping @Sendable (Snapshot) -> Void,
+         onSnapshot: @escaping @Sendable (Snapshot, Int) -> Void,
          onStatus: @escaping @Sendable (String) -> Void) {
         self.port = port
         self.token = token
@@ -24,6 +26,14 @@ final class SnapshotServer: @unchecked Sendable {
 
     func setToken(_ value: String) {
         queue.async { self.token = value }
+    }
+
+    func setEager(until date: Date) {
+        queue.async { self.eagerUntil = date }
+    }
+
+    private var nextSyncSeconds: Int {
+        Date() < eagerUntil ? AppModel.eagerSyncSeconds : AppModel.relaxedSyncSeconds
     }
 
     func start() {
@@ -88,8 +98,10 @@ final class SnapshotServer: @unchecked Sendable {
             }
             do {
                 let snapshot = try JSON.decoder.decode(Snapshot.self, from: request.body)
-                onSnapshot(snapshot)
-                respond(connection, status: 200, body: ["ok": "true"])
+                let next = nextSyncSeconds
+                onSnapshot(snapshot, next)
+                // O celular agenda o próximo envio com este intervalo.
+                respond(connection, status: 200, body: ["ok": true, "nextSyncSeconds": next])
             } catch {
                 respond(connection, status: 400, body: ["error": "invalid_payload", "detail": "\(error)"])
             }
@@ -98,7 +110,7 @@ final class SnapshotServer: @unchecked Sendable {
         }
     }
 
-    private func respond(_ connection: NWConnection, status: Int, body: [String: String]) {
+    private func respond(_ connection: NWConnection, status: Int, body: [String: Any]) {
         let payload = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
         let reason = [200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 413: "Payload Too Large"][status] ?? "OK"
         var head = "HTTP/1.1 \(status) \(reason)\r\n"

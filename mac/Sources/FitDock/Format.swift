@@ -23,6 +23,14 @@ enum Format {
         return "\(thousands.formatted(.number.precision(.fractionLength(1)).locale(locale))) mil"
     }
 
+    /// "40 s", "2 min", "2 min 30 s".
+    static func duration(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds) s" }
+        let minutes = seconds / 60
+        let rest = seconds % 60
+        return rest == 0 ? "\(minutes) min" : "\(minutes) min \(rest) s"
+    }
+
     static func time(_ date: Date) -> String {
         date.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(locale))
     }

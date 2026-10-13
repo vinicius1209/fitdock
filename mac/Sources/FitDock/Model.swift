@@ -60,6 +60,8 @@ final class AppModel {
     static let staleAfter: TimeInterval = 2 * 60 * 60
     /// Meta padrão do Samsung Health.
     static let defaultStepGoal = 6000
+    /// Calorias ativas que enchem o anel laranja (referência, não meta).
+    static let activeCaloriesReference = 500.0
 
     var snapshot: Snapshot?
     var receivedAt: Date?
@@ -70,7 +72,22 @@ final class AppModel {
     var serverStatus = "Iniciando…"
     var now = Date()
 
+    /// Pedido de atualização feito no Mac, ainda sem resposta do celular.
+    var refreshRequestedAt: Date?
+    /// Intervalo (s) que o Mac pediu ao celular na última resposta; prevê o próximo envio.
+    var lastNextSync = AppModel.relaxedSyncSeconds
+    /// Sobe a cada abertura do painel; dispara as animações de entrada.
+    var panelOpenCount = 0
+
+    /// Cadência pedida ao celular enquanto alguém olha o painel, e fora disso.
+    nonisolated static let eagerSyncSeconds = 45
+    nonisolated static let relaxedSyncSeconds = 180
+    /// Quanto tempo depois de abrir o painel (ou pedir atualização) o celular segue no ritmo rápido.
+    static let interestWindow: TimeInterval = 10 * 60
+
     @ObservationIgnored var onChange: (() -> Void)?
+    /// Avisa o servidor para pedir envios mais frequentes ao celular.
+    @ObservationIgnored var onInterest: (() -> Void)?
     @ObservationIgnored var onCodeChange: ((String) -> Void)?
     @ObservationIgnored private let dir: URL
 
@@ -100,12 +117,30 @@ final class AppModel {
         return now.timeIntervalSince(receivedAt) > AppModel.staleAfter
     }
 
-    func accept(_ s: Snapshot) {
+    func accept(_ s: Snapshot, nextSync: Int) {
         snapshot = s
         receivedAt = Date()
         now = Date()
+        lastNextSync = nextSync
+        refreshRequestedAt = nil
         save(StoredState(snapshot: snapshot, receivedAt: receivedAt), to: "state.json")
         onChange?()
+    }
+
+    /// Quando o próximo envio do celular deve chegar, pelo intervalo combinado na última resposta.
+    var expectedNextSync: Date? {
+        receivedAt?.addingTimeInterval(TimeInterval(lastNextSync))
+    }
+
+    func panelOpened() {
+        panelOpenCount += 1
+        now = Date()
+        onInterest?()
+    }
+
+    func requestRefresh() {
+        refreshRequestedAt = Date()
+        onInterest?()
     }
 
     func regenerateCode() {
